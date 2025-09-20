@@ -66,6 +66,7 @@ export function ensureSchema() {
       template_id INTEGER NOT NULL,
       date TEXT NOT NULL,
       answers_json TEXT NOT NULL,
+      metadata_json TEXT,
       pdf_drive_file_id TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY(user_id) REFERENCES users(id),
@@ -75,19 +76,28 @@ export function ensureSchema() {
     );
   `);
 
+  // Add metadata_json column if missing (older databases)
+  try {
+    db.prepare('ALTER TABLE checklist_submissions ADD COLUMN metadata_json TEXT').run();
+  } catch (err) {
+    // ignore if column already exists
+  }
+
   const count = db.prepare('SELECT COUNT(*) as c FROM checklist_templates').get().c;
   if (!count) {
     const sampleItems = [
-      "Lights working (headlights, indicators, brake lights)",
-      "Tyres condition & pressure",
-      "Mirrors and windscreen clean & intact",
-      "Brakes functional",
-      "Horn working",
-      "Fluids (oil, coolant, washer) at proper levels",
-      "Tachograph functioning",
-      "Fire extinguisher present",
-      "First aid kit present",
-      "Trailer coupling secure"
+      'Sprawdzenie wycieków pod pojazdem',
+      'Oświetlenie zewnętrzne (mijania, drogowe, kierunkowskazy, awaryjne)',
+      'Światła stop / cofania',
+      'Stan opon i mocowanie kół',
+      'Lusterka oraz szyby czyste i bez uszkodzeń',
+      'Wyposażenie kabiny: pasy, klakson, wycieraczki',
+      'Kontrolki na desce rozdzielczej - brak ostrzeżeń',
+      'Hamulec postojowy i roboczy działają prawidłowo',
+      'Tachograf / karta kierowcy przygotowane do pracy',
+      'Gaśnica, trójkąt, apteczka na wyposażeniu',
+      'Zabezpieczenie ładunku / mocowanie naczepy',
+      'Drzwi i schowki zamknięte, dokumenty pojazdu na pokładzie'
     ];
     db.prepare('INSERT INTO checklist_templates (name, items_json) VALUES (?, ?)').run('Standard Daily Check', JSON.stringify(sampleItems));
   }
