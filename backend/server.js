@@ -41,7 +41,11 @@ const DEFAULT_METRICS_SCHEMA = [
 const STATUS_LABELS = { ok: 'OK', issue: 'Wymaga uwagi', na: 'N/A' };
 const STATUS_ICONS = { ok: '✔', issue: '⚠', na: '○' };
 
-app.use(cors({ origin: ORIGIN, credentials: true }));
+const allowed = (ORIGIN || '').split(',').map(s => s.trim()).filter(Boolean);
+app.use(cors({
+  origin: allowed.length ? allowed : '*',
+  credentials: true
+}));
 app.use(helmet());
 app.use(express.json({ limit: '2mb' }));
 
