@@ -1,4 +1,3 @@
-
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -7,6 +6,8 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import dayjs from 'dayjs';
 import PDFDocument from 'pdfkit';
+import fs from 'fs';
+import path from 'path';
 import { google } from 'googleapis';
 import { db, ensureSchema } from './src/db.js';
 
@@ -16,6 +17,29 @@ const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret_change_me';
 const ORIGIN = process.env.CORS_ORIGIN || '*';
 const DRIVE_PARENT_FOLDER_ID = process.env.DRIVE_PARENT_FOLDER_ID || '';
 const GOOGLE_SERVICE_ACCOUNT_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '';
+
+const DATA_DIR = path.resolve(process.cwd(), 'data');
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+const DEFAULT_METRICS_SCHEMA = [
+  { key: 'startTime', label: 'Czas rozpoczęcia zmiany', type: 'time' },
+  { key: 'location', label: 'Lokalizacja startowa', type: 'text' },
+  { key: 'odometerStart', label: 'Stan licznika (km)', type: 'number', unit: 'km' },
+  { key: 'fuelLevel', label: 'Poziom paliwa', type: 'select', options: ['Pełny', '3/4', '1/2', '1/4', 'Rezerwa'] },
+  { key: 'defLevel', label: 'Poziom AdBlue / DEF', type: 'select', options: ['Pełny', '3/4', '1/2', '1/4', 'Niski'] },
+  { key: 'oilLevel', label: 'Poziom oleju', type: 'status', options: ['OK', 'Niski', 'Wymaga uzupełnienia'] },
+  { key: 'coolantLevel', label: 'Poziom płynu chłodzącego', type: 'status', options: ['OK', 'Niski'] },
+  { key: 'washerFluid', label: 'Płyn do spryskiwaczy', type: 'status', options: ['OK', 'Do uzupełnienia'] },
+  { key: 'tyrePressure', label: 'Ciśnienie w oponach (uwagi)', type: 'text' },
+  { key: 'cleanliness', label: 'Czystość kabiny', type: 'select', options: ['Wzorowa', 'Dobra', 'Wymaga uwagi'] },
+  { key: 'issues', label: 'Usterki do zgłoszenia', type: 'textarea' },
+  { key: 'notes', label: 'Dodatkowe notatki', type: 'textarea' }
+];
+
+const STATUS_LABELS = { ok: 'OK', issue: 'Wymaga uwagi', na: 'N/A' };
+const STATUS_ICONS = { ok: '✔', issue: '⚠', na: '○' };
 
 app.use(cors({ origin: ORIGIN, credentials: true }));
 app.use(helmet());
@@ -30,11 +54,23 @@ function getDriveClient() {
   try {
     credentials = JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON);
   } catch (e) {
-    const fs = require('fs');
-    credentials = JSON.parse(fs.readFileSync(GOOGLE_SERVICE_ACCOUNT_JSON, 'utf8'));
+    try {
+      const contents = fs.readFileSync(GOOGLE_SERVICE_ACCOUNT_JSON, 'utf8');
+      credentials = JSON.parse(contents);
+    } catch (err) {
+      console.error('Could not parse GOOGLE_SERVICE_ACCOUNT_JSON', err.message);
+      return null;
+    }
   }
   const scopes = ['https://www.googleapis.com/auth/drive.file', 'https://www.googleapis.com/auth/drive'];
-  const auth = new google.auth.JWT(credentials.client_email, null, credentials.private_key, scopes, credentials.user);
+  const privateKey = credentials.private_key?.replace(/\\n/g, '\n');
+  const auth = new google.auth.JWT(
+    credentials.client_email,
+    undefined,
+    privateKey,
+    scopes,
+    credentials.user || undefined
+  );
   return google.drive({ version: 'v3', auth });
 }
 
@@ -150,7 +186,12 @@ app.get('/admin/assignments', auth, requireAdmin, (_req, res) => {
 app.post('/admin/assignments', auth, requireAdmin, (req, res) => {
   const { user_id, vehicle_id, trailer_id, active } = req.body || {};
   if (!user_id || !vehicle_id) return res.status(400).json({ error: 'user_id and vehicle_id required' });
-  const info = db.prepare('INSERT INTO assignments (user_id, vehicle_id, trailer_id, active) VALUES (?, ?, ?, ?)').run(user_id, vehicle_id, trailer_id || null, active ? 1 : 1);
+  const info = db.prepare('INSERT INTO assignments (user_id, vehicle_id, trailer_id, active) VALUES (?, ?, ?, ?)').run(
+    user_id,
+    vehicle_id,
+    trailer_id || null,
+    active ? 1 : 0
+  );
   const row = db.prepare('SELECT * FROM assignments WHERE id = ?').get(info.lastInsertRowid);
   res.status(201).json({ assignment: row });
 });
@@ -180,20 +221,42 @@ app.get('/driver/daily', auth, (req, res) => {
     ORDER BY a.created_at DESC
     LIMIT 1
   `).get(req.user.sub);
-  if (!assignment) return res.json({ assignment: null, template: null });
+  if (!assignment) return res.json({ assignment: null, template: null, metricsSchema: DEFAULT_METRICS_SCHEMA });
 
   const template = db.prepare('SELECT * FROM checklist_templates WHERE active = 1 ORDER BY created_at DESC LIMIT 1').get();
+  if (!template) return res.status(400).json({ error: 'no active checklist template' });
   const items = JSON.parse(template.items_json);
+  const lastSubmission = db
+    .prepare(
+      `SELECT date, created_at, answers_json, metadata_json
+       FROM checklist_submissions
+       WHERE user_id = ?
+       ORDER BY created_at DESC
+       LIMIT 1`
+    )
+    .get(req.user.sub);
+  const history = lastSubmission
+    ? {
+        date: lastSubmission.date,
+        created_at: lastSubmission.created_at,
+        answers: JSON.parse(lastSubmission.answers_json),
+        metadata: lastSubmission.metadata_json ? JSON.parse(lastSubmission.metadata_json) : null
+      }
+    : null;
   res.json({
     assignment,
-    template: { id: template.id, name: template.name, items }
+    template: { id: template.id, name: template.name, items },
+    metricsSchema: DEFAULT_METRICS_SCHEMA,
+    lastSubmission: history
   });
 });
 
 // Driver submit
 app.post('/driver/submit', auth, async (req, res) => {
-  const { template_id, answers, date } = req.body || {};
-  if (!Array.isArray(answers) || !template_id) return res.status(400).json({ error: 'template_id and answers[] required' });
+  const { template_id, answers, date, metrics } = req.body || {};
+  if (!Array.isArray(answers) || !template_id) {
+    return res.status(400).json({ error: 'template_id and answers[] required' });
+  }
 
   const assignment = db.prepare(`
     SELECT a.*, v.registration, v.model, v.folder_id, t.number as trailer_number
@@ -208,23 +271,73 @@ app.post('/driver/submit', auth, async (req, res) => {
 
   const template = db.prepare('SELECT * FROM checklist_templates WHERE id = ?').get(template_id);
   if (!template) return res.status(400).json({ error: 'invalid template' });
+  const templateItems = JSON.parse(template.items_json);
+
+  let normalizedAnswers;
+  try {
+    normalizedAnswers = answers.map((entry, index) => {
+      const label = (entry && typeof entry.label === 'string' && entry.label.trim()) || templateItems[index] || `Pozycja ${index + 1}`;
+      const status = entry?.status;
+      if (!['ok', 'issue', 'na'].includes(status)) {
+        throw new Error('Każdy element checklisty musi mieć wybrany status');
+      }
+      return {
+        label,
+        status,
+        note: entry?.note ? String(entry.note).trim() : ''
+      };
+    });
+  } catch (err) {
+    return res.status(400).json({ error: err.message || 'invalid answers payload' });
+  }
+
+  if (normalizedAnswers.length !== templateItems.length) {
+    return res.status(400).json({ error: 'answers length mismatch with template' });
+  }
+
+  let sanitizedMetrics = {};
+  if (metrics && typeof metrics === 'object') {
+    sanitizedMetrics = DEFAULT_METRICS_SCHEMA.reduce((acc, field) => {
+      if (Object.prototype.hasOwnProperty.call(metrics, field.key)) {
+        const raw = metrics[field.key];
+        if (raw === null || raw === undefined || raw === '') {
+          acc[field.key] = null;
+        } else if (field.type === 'number') {
+          const num = Number(String(raw).replace(',', '.'));
+          acc[field.key] = Number.isFinite(num) ? num : null;
+        } else {
+          acc[field.key] = String(raw).trim();
+        }
+      }
+      return acc;
+    }, {});
+  }
 
   const today = date || dayjs().format('YYYY-MM-DD');
-  const info = db.prepare(`
-    INSERT INTO checklist_submissions (user_id, vehicle_id, trailer_id, template_id, date, answers_json)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(req.user.sub, assignment.vehicle_id, assignment.trailer_id || null, template_id, today, JSON.stringify(answers));
+  const info = db.prepare(
+    `INSERT INTO checklist_submissions (user_id, vehicle_id, trailer_id, template_id, date, answers_json, metadata_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    req.user.sub,
+    assignment.vehicle_id,
+    assignment.trailer_id || null,
+    template_id,
+    today,
+    JSON.stringify(normalizedAnswers),
+    Object.keys(sanitizedMetrics).length ? JSON.stringify(sanitizedMetrics) : null
+  );
   const submissionId = info.lastInsertRowid;
 
   // Generate PDF
-  const pdfPath = `./data/checklist_${assignment.registration}_${today}_${submissionId}.pdf`.replace(/\s+/g, '_');
+  const pdfPath = path.join(DATA_DIR, `checklist_${assignment.registration}_${today}_${submissionId}.pdf`).replace(/\s+/g, '_');
   await generateChecklistPDF(pdfPath, {
     userEmail: req.user.email,
     date: today,
     vehicle: { registration: assignment.registration, model: assignment.model },
     trailer: assignment.trailer_number,
     templateName: template.name,
-    answers
+    answers: normalizedAnswers,
+    metrics: sanitizedMetrics
   });
 
   // Upload to Drive
@@ -232,23 +345,25 @@ app.post('/driver/submit', auth, async (req, res) => {
   if (GOOGLE_SERVICE_ACCOUNT_JSON) {
     try {
       const drive = getDriveClient();
-      let folderId = assignment.folder_id;
-      if (!folderId && DRIVE_PARENT_FOLDER_ID) {
-        const folder = await drive.files.create({
-          requestBody: { name: `${assignment.registration}`, mimeType: 'application/vnd.google-apps.folder', parents: [DRIVE_PARENT_FOLDER_ID] },
-          fields: 'id'
-        });
-        folderId = folder.data.id;
-        db.prepare('UPDATE vehicles SET folder_id = ? WHERE id = ?').run(folderId, assignment.vehicle_id);
+      if (drive) {
+        let folderId = assignment.folder_id;
+        if (!folderId && DRIVE_PARENT_FOLDER_ID) {
+          const folder = await drive.files.create({
+            requestBody: { name: `${assignment.registration}`, mimeType: 'application/vnd.google-apps.folder', parents: [DRIVE_PARENT_FOLDER_ID] },
+            fields: 'id'
+          });
+          folderId = folder.data.id;
+          db.prepare('UPDATE vehicles SET folder_id = ? WHERE id = ?').run(folderId, assignment.vehicle_id);
+        }
+        const metadata = {
+          name: osPathBase(pdfPath),
+          parents: folderId ? [folderId] : DRIVE_PARENT_FOLDER_ID ? [DRIVE_PARENT_FOLDER_ID] : undefined
+        };
+        const media = { mimeType: 'application/pdf', body: fs.createReadStream(pdfPath) };
+        const file = await drive.files.create({ requestBody: metadata, media, fields: 'id, name' });
+        driveFileId = file.data.id;
+        db.prepare('UPDATE checklist_submissions SET pdf_drive_file_id = ? WHERE id = ?').run(driveFileId, submissionId);
       }
-      const metadata = {
-        name: osPathBase(pdfPath),
-        parents: folderId ? [folderId] : (DRIVE_PARENT_FOLDER_ID ? [DRIVE_PARENT_FOLDER_ID] : undefined)
-      };
-      const media = { mimeType: 'application/pdf', body: require('fs').createReadStream(pdfPath) };
-      const file = await drive.files.create({ requestBody: metadata, media, fields: 'id, name' });
-      driveFileId = file.data.id;
-      db.prepare('UPDATE checklist_submissions SET pdf_drive_file_id = ? WHERE id = ?').run(driveFileId, submissionId);
     } catch (e) {
       console.error('Drive upload failed:', e.message);
     }
@@ -258,30 +373,60 @@ app.post('/driver/submit', auth, async (req, res) => {
 });
 
 // PDF generator
-async function generateChecklistPDF(outPath, { userEmail, date, vehicle, trailer, templateName, answers }) {
-  const fs = require('fs');
+async function generateChecklistPDF(outPath, { userEmail, date, vehicle, trailer, templateName, answers, metrics }) {
   const doc = new PDFDocument({ margin: 36 });
   const stream = fs.createWriteStream(outPath);
   doc.pipe(stream);
 
-  doc.fontSize(18).text('Daily Vehicle Checklist', { align: 'center' });
+  const primaryColor = '#0f172a';
+  const accentColor = '#2563eb';
+  doc.fillColor(primaryColor);
+  doc.fontSize(20).font('Helvetica-Bold').text('Raport Daily Vehicle Checklist', { align: 'center' });
   doc.moveDown(0.5);
-  doc.fontSize(12).text(`Date: ${date}`);
-  doc.text(`Driver: ${userEmail}`);
-  doc.text(`Vehicle: ${vehicle.registration} (${vehicle.model})`);
+  doc.fillColor('black').fontSize(12).font('Helvetica');
+  doc.text(`Data raportu: ${dayjs(date).format('YYYY-MM-DD')}`);
+  doc.text(`Kierowca: ${userEmail}`);
+  doc.text(`Pojazd: ${vehicle.registration} (${vehicle.model})`);
   doc.text(`Trailer: ${trailer || '-'}`);
-  doc.moveDown(0.5);
-  doc.text(`Template: ${templateName}`);
-  doc.moveDown();
+  doc.text(`Szablon: ${templateName}`);
 
+  if (metrics && Object.keys(metrics).length) {
+    doc.moveDown();
+    doc.font('Helvetica-Bold').fillColor(primaryColor).text('Poranne odczyty i kontrole');
+    doc.moveDown(0.3);
+    doc.fillColor('black').font('Helvetica');
+    DEFAULT_METRICS_SCHEMA.forEach(field => {
+      if (
+        Object.prototype.hasOwnProperty.call(metrics, field.key) &&
+        metrics[field.key] !== undefined &&
+        metrics[field.key] !== null &&
+        metrics[field.key] !== ''
+      ) {
+        const value = metrics[field.key];
+        doc.text(`• ${field.label}: ${value}${field.unit ? ' ' + field.unit : ''}`);
+      }
+    });
+  }
+
+  doc.moveDown();
+  doc.font('Helvetica-Bold').fillColor(primaryColor).text('Walkaround checklist');
+  doc.moveDown(0.3);
   answers.forEach((a, idx) => {
-    const status = a.checked ? '✔' : '✖';
-    doc.text(`${idx + 1}. [${status}] ${a.label}${a.note ? ' — Note: ' + a.note : ''}`);
+    const icon = STATUS_ICONS[a.status] || '-';
+    const label = STATUS_LABELS[a.status] || a.status;
+    doc.fillColor(accentColor).font('Helvetica-Bold').text(`${idx + 1}. ${icon} ${a.label}`);
+    doc.fillColor('black').font('Helvetica').text(`Status: ${label}`);
+    if (a.note) {
+      doc.text(`Notatka: ${a.note}`);
+    }
+    doc.moveDown(0.2);
   });
 
   doc.end();
   await new Promise(resolve => stream.on('finish', resolve));
 }
-function osPathBase(p) { return p.split(/[/\\]/).pop(); }
+function osPathBase(p) {
+  return p.split(/[/\\]/).pop();
+}
 
 app.listen(PORT, () => console.log(`API listening on http://localhost:${PORT}`));
