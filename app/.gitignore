@@ -1,0 +1,26 @@
+# katalogi i buildy
+node_modules/
+.expo/
+.eas/
+dist/
+build/
+android/app/build/
+ios/build/
+web-build/
+
+# logi i śmieci
+*.log
+*.tmp
+npm-debug.log*
+yarn-error.log*
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# klucze i sekrety – NIGDY nie commituj
+android-upload-key.jks
+credentials.json
+.env
+.env.*
