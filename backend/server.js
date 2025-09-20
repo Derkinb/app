@@ -41,11 +41,40 @@ const DEFAULT_METRICS_SCHEMA = [
 const STATUS_LABELS = { ok: 'OK', issue: 'Wymaga uwagi', na: 'N/A' };
 const STATUS_ICONS = { ok: '✔', issue: '⚠', na: '○' };
 
-const allowed = (ORIGIN || '').split(',').map(s => s.trim()).filter(Boolean);
-app.use(cors({
-  origin: allowed.length ? allowed : '*',
-  credentials: true
-}));
+const ASSIGNMENT_SELECT = `
+  SELECT a.id, a.user_id, a.vehicle_id, a.trailer_id, a.active, a.created_at,
+         u.email AS user_email,
+         v.registration, v.model,
+         t.number AS trailer_number, t.id AS trailer_id
+  FROM assignments a
+  JOIN users u ON u.id = a.user_id
+  JOIN vehicles v ON v.id = a.vehicle_id
+  LEFT JOIN trailers t ON t.id = a.trailer_id
+`;
+
+function mapAssignment(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    vehicle_id: row.vehicle_id,
+    trailer_id: row.trailer_id,
+    active: row.active === 1 || row.active === true,
+    created_at: row.created_at,
+    user_email: row.user_email,
+    registration: row.registration,
+    model: row.model,
+    trailer_number: row.trailer_number,
+    trailer_id: row.trailer_id
+  };
+}
+
+function getAssignmentById(id) {
+  const row = db.prepare(`${ASSIGNMENT_SELECT} WHERE a.id = ?`).get(id);
+  return mapAssignment(row);
+}
+
+app.use(cors({ origin: ORIGIN, credentials: true }));
 app.use(helmet());
 app.use(express.json({ limit: '2mb' }));
 
@@ -131,8 +160,31 @@ app.get('/me', auth, (req, res) => {
 
 // Admin: vehicles
 app.get('/admin/vehicles', auth, requireAdmin, (_req, res) => {
-  const rows = db.prepare('SELECT * FROM vehicles ORDER BY created_at DESC').all();
-  res.json({ vehicles: rows });
+  const rows = db
+    .prepare(`
+      SELECT v.id, v.registration, v.model, v.folder_id, v.created_at,
+             a.id AS assignment_id, a.user_id AS driver_id,
+             u.email AS driver_email
+      FROM vehicles v
+      LEFT JOIN assignments a ON a.id = (
+        SELECT id FROM assignments WHERE vehicle_id = v.id AND active = 1 ORDER BY created_at DESC LIMIT 1
+      )
+      LEFT JOIN users u ON u.id = a.user_id
+      ORDER BY v.created_at DESC
+    `)
+    .all();
+  res.json({
+    vehicles: rows.map(row => ({
+      id: row.id,
+      registration: row.registration,
+      model: row.model,
+      folder_id: row.folder_id,
+      created_at: row.created_at,
+      driver_id: row.driver_id || null,
+      driver_email: row.driver_email || null,
+      active_assignment_id: row.assignment_id || null
+    }))
+  });
 });
 app.post('/admin/vehicles', auth, requireAdmin, async (req, res) => {
   const { registration, model } = req.body || {};
@@ -160,8 +212,33 @@ app.post('/admin/vehicles', auth, requireAdmin, async (req, res) => {
 
 // Admin: trailers
 app.get('/admin/trailers', auth, requireAdmin, (_req, res) => {
-  const rows = db.prepare('SELECT * FROM trailers ORDER BY created_at DESC').all();
-  res.json({ trailers: rows });
+  const rows = db
+    .prepare(`
+      SELECT t.id, t.number, t.created_at,
+             a.id AS assignment_id, a.user_id AS driver_id, a.vehicle_id,
+             u.email AS driver_email,
+             v.registration AS vehicle_registration
+      FROM trailers t
+      LEFT JOIN assignments a ON a.id = (
+        SELECT id FROM assignments WHERE trailer_id = t.id AND active = 1 ORDER BY created_at DESC LIMIT 1
+      )
+      LEFT JOIN users u ON u.id = a.user_id
+      LEFT JOIN vehicles v ON v.id = a.vehicle_id
+      ORDER BY t.created_at DESC
+    `)
+    .all();
+  res.json({
+    trailers: rows.map(row => ({
+      id: row.id,
+      number: row.number,
+      created_at: row.created_at,
+      driver_id: row.driver_id || null,
+      driver_email: row.driver_email || null,
+      vehicle_id: row.vehicle_id || null,
+      vehicle_registration: row.vehicle_registration || null,
+      active_assignment_id: row.assignment_id || null
+    }))
+  });
 });
 app.post('/admin/trailers', auth, requireAdmin, (req, res) => {
   const { number } = req.body || {};
@@ -177,27 +254,105 @@ app.post('/admin/trailers', auth, requireAdmin, (req, res) => {
 
 // Admin: assignments
 app.get('/admin/assignments', auth, requireAdmin, (_req, res) => {
-  const rows = db.prepare(`
-    SELECT a.id, a.active, u.email as user_email, u.id as user_id, v.registration, v.id as vehicle_id, t.number as trailer_number, t.id as trailer_id, a.created_at
-    FROM assignments a
-    JOIN users u ON u.id = a.user_id
-    JOIN vehicles v ON v.id = a.vehicle_id
-    LEFT JOIN trailers t ON t.id = a.trailer_id
-    ORDER BY a.created_at DESC
-  `).all();
-  res.json({ assignments: rows });
+  const rows = db.prepare(`${ASSIGNMENT_SELECT} ORDER BY a.created_at DESC`).all();
+  res.json({ assignments: rows.map(mapAssignment) });
 });
 app.post('/admin/assignments', auth, requireAdmin, (req, res) => {
   const { user_id, vehicle_id, trailer_id, active } = req.body || {};
-  if (!user_id || !vehicle_id) return res.status(400).json({ error: 'user_id and vehicle_id required' });
-  const info = db.prepare('INSERT INTO assignments (user_id, vehicle_id, trailer_id, active) VALUES (?, ?, ?, ?)').run(
-    user_id,
-    vehicle_id,
-    trailer_id || null,
-    active ? 1 : 0
-  );
-  const row = db.prepare('SELECT * FROM assignments WHERE id = ?').get(info.lastInsertRowid);
-  res.status(201).json({ assignment: row });
+  const userId = Number(user_id);
+  const vehicleId = Number(vehicle_id);
+  const trailerIdRaw = trailer_id === undefined || trailer_id === null || trailer_id === '' ? null : Number(trailer_id);
+
+  if (!Number.isInteger(userId) || !Number.isInteger(vehicleId)) {
+    return res.status(400).json({ error: 'user_id and vehicle_id required' });
+  }
+  if (trailerIdRaw !== null && !Number.isInteger(trailerIdRaw)) {
+    return res.status(400).json({ error: 'invalid trailer_id' });
+  }
+
+  const driver = db.prepare("SELECT id, email FROM users WHERE id = ? AND role = 'driver'").get(userId);
+  if (!driver) return res.status(404).json({ error: 'driver not found' });
+  const vehicle = db.prepare('SELECT id FROM vehicles WHERE id = ?').get(vehicleId);
+  if (!vehicle) return res.status(404).json({ error: 'vehicle not found' });
+  if (trailerIdRaw !== null) {
+    const trailer = db.prepare('SELECT id FROM trailers WHERE id = ?').get(trailerIdRaw);
+    if (!trailer) return res.status(404).json({ error: 'trailer not found' });
+  }
+
+  const isActive = active === false ? 0 : 1;
+  if (isActive) {
+    db.prepare('UPDATE assignments SET active = 0 WHERE user_id = ? AND active = 1').run(userId);
+    db.prepare('UPDATE assignments SET active = 0 WHERE vehicle_id = ? AND active = 1').run(vehicleId);
+    if (trailerIdRaw) {
+      db.prepare('UPDATE assignments SET active = 0 WHERE trailer_id = ? AND active = 1').run(trailerIdRaw);
+    }
+  }
+
+  const info = db
+    .prepare('INSERT INTO assignments (user_id, vehicle_id, trailer_id, active) VALUES (?, ?, ?, ?)')
+    .run(userId, vehicleId, trailerIdRaw, isActive);
+  const assignment = getAssignmentById(info.lastInsertRowid);
+  res.status(201).json({ assignment });
+});
+
+app.patch('/admin/assignments/:id', auth, requireAdmin, (req, res) => {
+  const assignmentId = Number(req.params.id);
+  const { active } = req.body || {};
+  if (!Number.isInteger(assignmentId)) return res.status(400).json({ error: 'invalid assignment id' });
+  if (typeof active !== 'boolean') return res.status(400).json({ error: 'active boolean required' });
+
+  const existing = db.prepare('SELECT * FROM assignments WHERE id = ?').get(assignmentId);
+  if (!existing) return res.status(404).json({ error: 'assignment not found' });
+
+  if (active) {
+    db.prepare('UPDATE assignments SET active = 0 WHERE user_id = ? AND id != ?').run(existing.user_id, assignmentId);
+    db.prepare('UPDATE assignments SET active = 0 WHERE vehicle_id = ? AND id != ?').run(existing.vehicle_id, assignmentId);
+    if (existing.trailer_id) {
+      db.prepare('UPDATE assignments SET active = 0 WHERE trailer_id = ? AND id != ?').run(existing.trailer_id, assignmentId);
+    }
+  }
+
+  db.prepare('UPDATE assignments SET active = ? WHERE id = ?').run(active ? 1 : 0, assignmentId);
+  const assignment = getAssignmentById(assignmentId);
+  res.json({ assignment });
+});
+
+app.get('/admin/drivers', auth, requireAdmin, (_req, res) => {
+  const rows = db
+    .prepare(`
+      SELECT u.id, u.email, u.created_at,
+             a.id AS assignment_id, a.vehicle_id, a.trailer_id, a.active,
+             v.registration, v.model,
+             t.number AS trailer_number
+      FROM users u
+      LEFT JOIN assignments a ON a.id = (
+        SELECT id FROM assignments WHERE user_id = u.id AND active = 1 ORDER BY created_at DESC LIMIT 1
+      )
+      LEFT JOIN vehicles v ON v.id = a.vehicle_id
+      LEFT JOIN trailers t ON t.id = a.trailer_id
+      WHERE u.role = 'driver'
+      ORDER BY u.created_at DESC
+    `)
+    .all();
+
+  res.json({
+    drivers: rows.map(row => ({
+      id: row.id,
+      email: row.email,
+      created_at: row.created_at,
+      assignment: row.assignment_id
+        ? {
+            id: row.assignment_id,
+            vehicle_id: row.vehicle_id,
+            trailer_id: row.trailer_id,
+            registration: row.registration,
+            model: row.model,
+            trailer_number: row.trailer_number,
+            active: row.active === 1
+          }
+        : null
+    }))
+  });
 });
 
 // Admin: checklist templates
