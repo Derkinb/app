@@ -1,26 +1,48 @@
 import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 
-const extra = Constants?.expoConfig?.extra ?? {};
-const explicitUrl =
-  (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_API_URL) ||
-  extra.apiUrl ||
-  null;
+// WEB -> backend na localhost:4000
+// ANDROID (emulator) -> 10.0.2.2:4000
+// ANDROID (fizyczny telefon w tej samej sieci) -> wpisz IP komputera, np. http://192.168.0.10:4000
+const DEV_WEB = 'http://localhost:4000';
+const DEV_ANDROID = 'http://10.0.2.2:4000';
 
-const hostFromExpo = Constants?.expoConfig?.hostUri
-  ? Constants.expoConfig.hostUri.split(':')[0]
-  : null;
+const devDefaultUrl = Platform.OS === 'web' ? DEV_WEB : DEV_ANDROID;
 
-const webHost =
-  typeof window !== 'undefined' && window.location?.hostname
-    ? window.location.hostname
-    : 'localhost';
+const getConfiguredApiUrl = () => {
+  if (process.env.EXPO_PUBLIC_API_URL) {
+    return process.env.EXPO_PUBLIC_API_URL;
+  }
 
-const devDefaultUrl = Platform.select({
-  android: hostFromExpo ? `http://${hostFromExpo}:4000` : 'http://10.0.2.2:4000',
-  ios: hostFromExpo ? `http://${hostFromExpo}:4000` : 'http://localhost:4000',
-  web: `http://${webHost}:4000`,
-  default: hostFromExpo ? `http://${hostFromExpo}:4000` : 'http://localhost:4000'
-});
+  const extra =
+    Constants?.expoConfig?.extra ??
+    Constants?.manifest2?.extra ??
+    Constants?.manifest?.extra;
 
-export const API_URL = explicitUrl || (__DEV__ ? devDefaultUrl : 'https://your-api.example.com');
+  if (extra?.apiUrl) {
+    return extra.apiUrl;
+  }
+
+  return undefined;
+};
+
+const getFallbackApiUrl = () => {
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    return window.location.origin;
+  }
+
+  return devDefaultUrl;
+};
+
+const configuredApiUrl = getConfiguredApiUrl();
+const fallbackApiUrl = configuredApiUrl ? null : getFallbackApiUrl();
+
+if (!configuredApiUrl && fallbackApiUrl) {
+  const fallbackSource =
+    fallbackApiUrl === devDefaultUrl ? 'default development URL' : 'window.location.origin';
+  console.warn(
+    `[config] API_URL fallback (${fallbackSource}). Ustaw zmienną EXPO_PUBLIC_API_URL lub extra.apiUrl jeśli to niezamierzone.`,
+  );
+}
+
+export const API_URL = configuredApiUrl ?? fallbackApiUrl ?? devDefaultUrl;
