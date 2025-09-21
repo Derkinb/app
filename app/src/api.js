@@ -101,7 +101,10 @@ export async function api(path, options = {}) {
 
   if (!response.ok) {
     const message = data?.error || data?.message || response.statusText;
-    throw new Error(message || 'Request failed');
+    const error = new Error(message || 'Request failed');
+    error.status = response.status;
+    error.data = data;
+    throw error;
   }
 
   return data;

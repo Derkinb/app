@@ -22,7 +22,12 @@ export function AuthProvider({ children }) {
       } catch (err) {
         await clearToken();
         setUser(null);
-        setBootError(err.message);
+        const isMissingToken = err?.status === 401 && err?.message === 'missing token';
+        if (isMissingToken) {
+          setBootError(null);
+        } else {
+          setBootError(err.message);
+        }
       } finally {
         setLoading(false);
       }
@@ -41,6 +46,7 @@ export function AuthProvider({ children }) {
         });
         await setToken(data.token);
         setUser(data.user);
+        setBootError(null);
         return data.user;
       },
       register: async ({ email, password, role }) => {
@@ -50,6 +56,7 @@ export function AuthProvider({ children }) {
         });
         await setToken(data.token);
         setUser(data.user);
+        setBootError(null);
         return data.user;
       },
       signOut: async () => {
