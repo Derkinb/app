@@ -22,8 +22,12 @@ export function AuthProvider({ children }) {
       } catch (err) {
         await clearToken();
         setUser(null);
-        const isMissingToken = err?.status === 401 && String(err?.message).toLowerCase() === 'missing token';
-        setBootError(isMissingToken ? null : err?.message || 'Request failed');
+        const isMissingToken = err?.status === 401 && err?.message === 'missing token';
+        if (isMissingToken) {
+          setBootError(null);
+        } else {
+          setBootError(err.message);
+        }
       } finally {
         setLoading(false);
       }
@@ -58,7 +62,6 @@ export function AuthProvider({ children }) {
       signOut: async () => {
         await clearToken();
         setUser(null);
-        setBootError(null);
       }
     }),
     [user, loading, bootError]
