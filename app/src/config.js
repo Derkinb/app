@@ -9,40 +9,84 @@ const DEV_ANDROID = 'http://10.0.2.2:4000';
 
 const devDefaultUrl = Platform.OS === 'web' ? DEV_WEB : DEV_ANDROID;
 
-const getConfiguredApiUrl = () => {
-  if (process.env.EXPO_PUBLIC_API_URL) {
-    return process.env.EXPO_PUBLIC_API_URL;
+const expoExtras =
+  Constants?.expoConfig?.extra ??
+  Constants?.expoConfig?.expoGo?.extra ??
+  Constants?.manifest2?.extra ??
+  Constants?.manifest?.extra ??
+  {};
+
+const explicitUrl =
+  process.env.EXPO_PUBLIC_API_URL ??
+  process.env.API_URL ??
+  expoExtras.apiUrl ??
+  expoExtras.API_URL ??
+  expoExtras.backendUrl ??
+  expoExtras.backendURL ??
+  null;
+
+function normaliseUrl(url) {
+  if (!url) {
+    return null;
+  }
+  return url.replace(/\/+$/, '');
+}
+
+function extractHostCandidate() {
+  const candidates = [
+    Constants?.expoConfig?.hostUri,
+    Constants?.expoConfig?.debuggerHost,
+    Constants?.manifest2?.extra?.expoGo?.developer?.url,
+    Constants?.manifest?.hostUri,
+    Constants?.manifest?.debuggerHost,
+    Constants?.expoGoConfig?.hostUri
+  ];
+
+  for (const value of candidates) {
+    if (typeof value !== 'string' || value.length === 0) {
+      continue;
+    }
+
+    const withoutProtocol = value.replace(/^(https?:\/\/)/, '');
+    const [hostPart] = withoutProtocol.split(/[/?#]/);
+    if (!hostPart) {
+      continue;
+    }
+
+    const [hostname] = hostPart.split(':');
+    if (hostname) {
+      return hostname;
+    }
   }
 
-  const extra =
-    Constants?.expoConfig?.extra ??
-    Constants?.manifest2?.extra ??
-    Constants?.manifest?.extra;
+  return null;
+}
 
-  if (extra?.apiUrl) {
-    return extra.apiUrl;
+function buildUrlFromHost(host) {
+  if (!host) {
+    return null;
   }
 
-  return undefined;
-};
-
-const getFallbackApiUrl = () => {
-  if (typeof window !== 'undefined' && window.location?.origin) {
-    return window.location.origin;
+  try {
+    const base = new URL(devDefaultUrl);
+    const portSegment = base.port ? `:${base.port}` : '';
+    return `${base.protocol}//${host}${portSegment}`;
+  } catch (error) {
+    // W razie problemów z parsowaniem URL korzystamy z domyślnych wartości dev.
+    const fallback = normaliseUrl(devDefaultUrl);
+    return fallback ?? null;
   }
+}
 
-  return devDefaultUrl;
-};
+const hostFromExpo = buildUrlFromHost(extractHostCandidate());
 
-const configuredApiUrl = getConfiguredApiUrl();
-const fallbackApiUrl = configuredApiUrl ? null : getFallbackApiUrl();
+const resolvedApiUrl = normaliseUrl(explicitUrl ?? hostFromExpo ?? devDefaultUrl);
 
-if (!configuredApiUrl && fallbackApiUrl) {
-  const fallbackSource =
-    fallbackApiUrl === devDefaultUrl ? 'default development URL' : 'window.location.origin';
+if (!explicitUrl) {
   console.warn(
-    `[config] API_URL fallback (${fallbackSource}). Ustaw zmienną EXPO_PUBLIC_API_URL lub extra.apiUrl jeśli to niezamierzone.`,
+    '[config] API_URL nie zostało skonfigurowane. Korzystam z adresu domyślnego',
+    resolvedApiUrl
   );
 }
 
-export const API_URL = configuredApiUrl ?? fallbackApiUrl ?? devDefaultUrl;
+export const API_URL = resolvedApiUrl;
