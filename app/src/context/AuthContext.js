@@ -19,10 +19,19 @@ export function AuthProvider({ children }) {
       try {
         const data = await api('/me');
         setUser(data.user);
+        setBootError(null);
       } catch (err) {
-        await clearToken();
+        const isMissingToken =
+          err?.status === 401 && (err?.message === 'missing token' || err?.data?.error === 'missing token');
+
+        if (!isMissingToken) {
+          await clearToken();
+          setBootError(err?.message || 'Request failed');
+        } else {
+          setBootError(null);
+        }
+
         setUser(null);
-        setBootError(err.message);
       } finally {
         setLoading(false);
       }
@@ -41,6 +50,7 @@ export function AuthProvider({ children }) {
         });
         await setToken(data.token);
         setUser(data.user);
+        setBootError(null);
         return data.user;
       },
       register: async ({ email, password, role }) => {
@@ -50,11 +60,13 @@ export function AuthProvider({ children }) {
         });
         await setToken(data.token);
         setUser(data.user);
+        setBootError(null);
         return data.user;
       },
       signOut: async () => {
         await clearToken();
         setUser(null);
+        setBootError(null);
       }
     }),
     [user, loading, bootError]
